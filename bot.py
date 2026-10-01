@@ -107,6 +107,26 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS consultations (
+                telegram_user_id INTEGER PRIMARY KEY,
+                telegram_username TEXT,
+                telegram_name TEXT,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                admin_request_message_id INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS consultation_messages (
+                admin_message_id INTEGER PRIMARY KEY,
+                telegram_user_id INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 def privacy_text() -> str:
@@ -243,11 +263,40 @@ async def consultation_request_callback(update: Update, context: ContextTypes.DE
         "개인정보 안내 화면에서 상담사 연결을 요청했습니다."
     )
 
-    await context.bot.send_message(
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("상담 시작", callback_data=f"consult:start:{user.id}"),
+        InlineKeyboardButton("상담 완료", callback_data=f"consult:done:{user.id}"),
+    ]])
+
+    admin_msg = await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=admin_text,
         parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
     )
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO consultations (
+                telegram_user_id, telegram_username, telegram_name,
+                status, requested_at, admin_request_message_id
+            )
+            VALUES (?, ?, ?, 'pending', ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+                telegram_username=excluded.telegram_username,
+                telegram_name=excluded.telegram_name,
+                status='pending',
+                requested_at=excluded.requested_at,
+                admin_request_message_id=excluded.admin_request_message_id
+            """,
+            (user.id, user.username, user.full_name, requested_at, admin_msg.message_id),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO consultation_messages (admin_message_id, telegram_user_id) VALUES (?, ?)",
+            (admin_msg.message_id, user.id),
+        )
+        conn.commit()
 
     await query.message.reply_text(
         "<b>상담 요청이 접수되었습니다.</b>\n\n"
@@ -257,6 +306,152 @@ async def consultation_request_callback(update: Update, context: ContextTypes.DE
     )
     return CONSENT
 
+
+
+async def consultation_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, action, user_id_str = query.data.split(":")
+        user_id = int(user_id_str)
+    except Exception:
+        return
+
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM consultations WHERE telegram_user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if not row:
+            await query.answer("상담 요청 정보를 찾을 수 없습니다.", show_alert=True)
+            return
+
+        if action == "start":
+            conn.execute(
+                "UPDATE consultations SET status = 'active' WHERE telegram_user_id = ?",
+                (user_id,),
+            )
+            conn.commit()
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "<b>상담사가 연결되었습니다.</b>\n\n"
+                    "궁금하신 내용을 편하게 입력해 주세요.\n"
+                    "이 채팅창에 보내주신 메시지는 담당 상담사에게 전달됩니다.\n\n"
+                    f"{OPERATING_HOURS_NOTICE}"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("상담중", callback_data=f"consult:start:{user_id}"),
+                    InlineKeyboardButton("상담 완료", callback_data=f"consult:done:{user_id}"),
+                ]])
+            )
+
+        elif action == "done":
+            conn.execute(
+                "UPDATE consultations SET status = 'done' WHERE telegram_user_id = ?",
+                (user_id,),
+            )
+            conn.commit()
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "<b>상담이 종료되었습니다.</b>\n\n"
+                    "추가 문의가 필요하시면 언제든 다시 상담사 연결을 요청해 주세요.\n\n"
+                    "감사합니다."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("상담 완료됨", callback_data=f"consult:done:{user_id}")
+                ]])
+            )
+
+
+async def consultation_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.effective_chat.id == ADMIN_CHAT_ID:
+        return
+
+    user_id = update.effective_user.id
+
+    with db() as conn:
+        row = conn.execute(
+            "SELECT status FROM consultations WHERE telegram_user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if not row or row["status"] != "active":
+        return
+
+    if not update.message.text:
+        await update.message.reply_text("현재 상담 중에는 텍스트 메시지로 문의해 주세요.")
+        return
+
+    username = f"@{update.effective_user.username}" if update.effective_user.username else "없음"
+    admin_msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            "💬 <b>상담 메시지</b>\n\n"
+            f"<b>Telegram 이름</b>: {update.effective_user.full_name}\n"
+            f"<b>Telegram</b>: {username}\n"
+            f"<b>User ID</b>: <code>{user_id}</code>\n\n"
+            f"{update.message.text}\n\n"
+            "이 메시지에 <b>답장(Reply)</b>하면 사용자에게 전달됩니다."
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO consultation_messages (admin_message_id, telegram_user_id) VALUES (?, ?)",
+            (admin_msg.message_id, user_id),
+        )
+        conn.commit()
+
+
+async def consultation_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    if not update.message.reply_to_message:
+        return
+    if not update.message.text:
+        return
+
+    replied_id = update.message.reply_to_message.message_id
+
+    with db() as conn:
+        mapping = conn.execute(
+            "SELECT telegram_user_id FROM consultation_messages WHERE admin_message_id = ?",
+            (replied_id,),
+        ).fetchone()
+
+        if not mapping:
+            return
+
+        user_id = mapping["telegram_user_id"]
+
+        session = conn.execute(
+            "SELECT status FROM consultations WHERE telegram_user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if not session or session["status"] != "active":
+        await update.message.reply_text("현재 활성화된 상담이 아닙니다.")
+        return
+
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=update.message.text,
+    )
 
 async def consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -527,6 +722,9 @@ def main():
     )
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(admin_status_callback, pattern=r"^status:\d+:(accepted|consulting|done)$"))
+    app.add_handler(CallbackQueryHandler(consultation_status_callback, pattern=r"^consult:(start|done):\d+$"))
+    app.add_handler(MessageHandler(filters.Chat(ADMIN_CHAT_ID) & filters.REPLY & filters.TEXT & ~filters.COMMAND, consultation_admin_reply))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, consultation_user_message))
     app.add_error_handler(error_handler)
     print("봇 실행 중... 종료하려면 Ctrl+C")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
