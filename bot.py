@@ -76,6 +76,11 @@ STATUS_LABELS = {
     "done": "완료",
 }
 
+OPERATING_HOURS_NOTICE = (
+    "상담 가능 시간은 평일 오전 9시부터 오후 9시까지이며, 주말 및 공휴일은 운영하지 않습니다.\n\n"
+    "문의량에 따라 답변이 다소 지연될 수 있으며, 운영시간 외 접수된 요청은 다음 영업일에 순차적으로 안내드립니다."
+)
+
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -141,6 +146,9 @@ def privacy_text() -> str:
 <b>6. 문의</b>
 운영자: {PRIVACY_OPERATOR}
 문의처: {PRIVACY_CONTACT}
+
+<b>운영시간 안내</b>
+{OPERATING_HOURS_NOTICE}
 
 위 내용을 확인하였으며 개인정보 수집·이용에 동의하시겠습니까?
 """.strip()
@@ -243,6 +251,7 @@ async def consultation_request_callback(update: Update, context: ContextTypes.DE
 
     await query.message.reply_text(
         "<b>상담 요청이 접수되었습니다.</b>\n\n"
+        f"{OPERATING_HOURS_NOTICE}\n\n"
         "관리자가 확인한 뒤 순차적으로 안내드리겠습니다.",
         parse_mode=ParseMode.HTML,
     )
@@ -446,6 +455,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(
         "<b>참가신청이 정상적으로 접수되었습니다.</b>\n\n"
         "작성해주신 내용을 확인한 뒤 순차적으로 안내드리겠습니다.\n\n"
+        f"{OPERATING_HOURS_NOTICE}\n\n"
         "신청 후 운영진을 사칭하여 수익·원금 보장, 계정 위임, 과도한 입금을 요구하는 개인 메시지에는 각별히 주의해 주세요.\n\n"
         "감사합니다.",
         parse_mode=ParseMode.HTML,
