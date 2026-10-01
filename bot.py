@@ -207,6 +207,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("동의하고 참가신청 시작", callback_data="consent:yes")],
+        [InlineKeyboardButton("상담사 연결", callback_data="consult:request")],
         [InlineKeyboardButton("동의하지 않습니다", callback_data="consent:no")],
     ])
     await update.message.reply_text(
@@ -216,6 +217,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
     )
     return CONSENT
+
+async def consultation_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    username = f"@{user.username}" if user.username else "없음"
+    requested_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+    admin_text = (
+        "📞 <b>상담사 연결 요청이 도착했습니다.</b>\n\n"
+        f"<b>Telegram 이름</b>: {user.full_name}\n"
+        f"<b>Telegram</b>: {username}\n"
+        f"<b>User ID</b>: <code>{user.id}</code>\n"
+        f"<b>요청시간</b>: {requested_at}\n\n"
+        "개인정보 안내 화면에서 상담사 연결을 요청했습니다."
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=admin_text,
+        parse_mode=ParseMode.HTML,
+    )
+
+    await query.message.reply_text(
+        "<b>상담 요청이 접수되었습니다.</b>\n\n"
+        "관리자가 확인한 뒤 순차적으로 안내드리겠습니다.",
+        parse_mode=ParseMode.HTML,
+    )
+    return CONSENT
+
 
 async def consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -357,6 +389,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("동의하고 참가신청 시작", callback_data="consent:yes")],
+            [InlineKeyboardButton("상담사 연결", callback_data="consult:request")],
             [InlineKeyboardButton("동의하지 않습니다", callback_data="consent:no")],
         ])
         await query.message.reply_text(
@@ -461,7 +494,10 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CONSENT: [CallbackQueryHandler(consent_callback, pattern=r"^consent:(yes|no)$")],
+            CONSENT: [
+                CallbackQueryHandler(consent_callback, pattern=r"^consent:(yes|no)$"),
+                CallbackQueryHandler(consultation_request_callback, pattern=r"^consult:request$"),
+            ],
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
             PHONE: [
                 MessageHandler(filters.CONTACT, phone_contact),
