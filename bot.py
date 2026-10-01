@@ -455,8 +455,11 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(
         "<b>참가신청이 정상적으로 접수되었습니다.</b>\n\n"
         "작성해주신 내용을 확인한 뒤 순차적으로 안내드리겠습니다.\n\n"
+        "<b>상담 운영시간</b>\n"
         f"{OPERATING_HOURS_NOTICE}\n\n"
-        "신청 후 운영진을 사칭하여 수익·원금 보장, 계정 위임, 과도한 입금을 요구하는 개인 메시지에는 각별히 주의해 주세요.\n\n"
+        "안내는 본 봇과 공식 상담 채널을 통해 진행됩니다. "
+        "운영진을 사칭한 계정에서 별도의 입금이나 계정 정보 제공을 요청하는 경우에는 "
+        "먼저 공식 상담 채널을 통해 확인해 주세요.\n\n"
         "감사합니다.",
         parse_mode=ParseMode.HTML,
     )
