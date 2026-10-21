@@ -685,6 +685,113 @@ async def admin_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=admin_status_keyboard(app_id),
     )
 
+
+# Google Forms: administrator assignment and status tracking.
+# Form notifications are sent by Apps Script with callback_data gf:<sheet_id>:<row>:take.
+FORM_STATUS = {"take": "접수 완료", "calling": "연락 중", "retry": "재연락 필요", "done": "입장 완료"}
+
+def init_form_assignments():
+    with db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS form_assignments (
+                sheet_id INTEGER NOT NULL,
+                row_number INTEGER NOT NULL,
+                message_id INTEGER,
+                staff_id INTEGER NOT NULL,
+                staff_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'take',
+                claimed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (sheet_id, row_number)
+            )
+        """)
+        conn.commit()
+
+def form_buttons(sheet_id, row_number, claimed=False):
+    prefix = f"gf:{sheet_id}:{row_number}:"
+    if not claimed:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🙋 내가 접수하기", callback_data=prefix + "take")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📞 연락 중", callback_data=prefix + "calling"),
+         InlineKeyboardButton("🔄 재연락 필요", callback_data=prefix + "retry")],
+        [InlineKeyboardButton("✅ 입장 완료", callback_data=prefix + "done")]
+    ])
+
+async def form_assignment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.message or query.message.chat_id != ADMIN_CHAT_ID:
+        if query:
+            await query.answer("관리자방에서만 사용할 수 있습니다.", show_alert=True)
+        return
+    try:
+        _, sid, rid, action = query.data.split(":")
+        sheet_id, row_number = int(sid), int(rid)
+    except (ValueError, AttributeError):
+        await query.answer("신청 정보를 읽을 수 없습니다.", show_alert=True)
+        return
+    if action not in FORM_STATUS or row_number < 2:
+        await query.answer("잘못된 처리 상태입니다.", show_alert=True)
+        return
+
+    person = query.from_user
+    staff_name = person.full_name or person.username or str(person.id)
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    message_text = query.message.text or ""
+    # On ephemeral storage, do not silently reassign a visibly claimed message.
+    if action == "take" and ("담당자:" in message_text or "담당자：" in message_text):
+        await query.answer("이미 접수된 신청입니다.", show_alert=True)
+        return
+
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM form_assignments WHERE sheet_id=? AND row_number=?",
+            (sheet_id, row_number),
+        ).fetchone()
+        if action == "take":
+            if row:
+                conn.rollback()
+                await query.answer("이미 다른 담당자가 접수했습니다.", show_alert=True)
+                return
+            conn.execute(
+                """INSERT INTO form_assignments
+                   (sheet_id,row_number,message_id,staff_id,staff_name,status,claimed_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (sheet_id,row_number,query.message.message_id,person.id,staff_name,"take",now,now),
+            )
+            conn.commit()
+        else:
+            if not row:
+                conn.rollback()
+                await query.answer("접수 기록이 없습니다. 관리자에게 문의해 주세요.", show_alert=True)
+                return
+            if row["staff_id"] != person.id:
+                conn.rollback()
+                await query.answer("접수한 담당자만 상태를 변경할 수 있습니다.", show_alert=True)
+                return
+            conn.execute(
+                "UPDATE form_assignments SET status=?, updated_at=? WHERE sheet_id=? AND row_number=?",
+                (action,now,sheet_id,row_number),
+            )
+            staff_name = row["staff_name"]
+            conn.commit()
+
+    # Strip our previous footer and append the new status in one edited message.
+    base = message_text.split("\n\n담당자:")[0]
+    base = re.sub(r"(?:📌 상태: )신규 접수\s*$", "", base).rstrip()
+    new_text = (
+        base + "\n\n담당자: " + staff_name +
+        "\n처리 상태: " + FORM_STATUS[action] +
+        "\n처리 시각: " + now
+    )
+    try:
+        await query.edit_message_text(
+            new_text, reply_markup=form_buttons(sheet_id,row_number,claimed=True),
+        )
+        await query.answer("처리 상태가 저장되었습니다.")
+    except Exception:
+        await query.answer("기록은 저장됐지만 메시지 수정에 실패했습니다. 관리자에게 확인하세요.", show_alert=True)
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
@@ -698,6 +805,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+    init_form_assignments()
     app = Application.builder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -721,6 +829,7 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(conv)
+    app.add_handler(CallbackQueryHandler(form_assignment_callback, pattern=r"^gf:\d+:\d+:(take|calling|retry|done)$"))
     app.add_handler(CallbackQueryHandler(admin_status_callback, pattern=r"^status:\d+:(accepted|consulting|done)$"))
     app.add_handler(CallbackQueryHandler(consultation_status_callback, pattern=r"^consult:(start|done):\d+$"))
     app.add_handler(MessageHandler(filters.Chat(ADMIN_CHAT_ID) & filters.REPLY & filters.TEXT & ~filters.COMMAND, consultation_admin_reply))
