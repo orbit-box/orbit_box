@@ -828,7 +828,8 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(form_assignment_callback, pattern=r"^gf:\\d+:\\d+:(take|calling|retry|done)$"))\n    app.add_handler(CallbackQueryHandler(admin_status_callback, pattern=r"^status:\d+:(accepted|consulting|done)$"))
+    app.add_handler(CallbackQueryHandler(form_assignment_callback, pattern=r"^gf:\d+:\d+:(take|calling|retry|done)$"))
+    app.add_handler(CallbackQueryHandler(admin_status_callback, pattern=r"^status:\d+:(accepted|consulting|done)$"))
     app.add_handler(CallbackQueryHandler(consultation_status_callback, pattern=r"^consult:(start|done):\d+$"))
     app.add_handler(MessageHandler(filters.Chat(ADMIN_CHAT_ID) & filters.REPLY & filters.TEXT & ~filters.COMMAND, consultation_admin_reply))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, consultation_user_message))
