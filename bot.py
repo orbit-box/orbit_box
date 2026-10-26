@@ -699,6 +699,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
+    from leading_records import install as install_leading_records
+    install_leading_records(app, ADMIN_CHAT_ID)
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
