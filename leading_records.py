@@ -453,6 +453,9 @@ async def monitor_prices(app, admin_id):
                 records = conn.execute("SELECT * FROM leading_records WHERE result_type='open' AND monitor_active=1 AND target_mode='price'").fetchall()
             if records:
                 prices = await asyncio.to_thread(get_prices, {"KRW-" + r["symbol"] for r in records})
+                missing = sorted({r["symbol"] for r in records if "KRW-" + r["symbol"] not in prices})
+                if missing:
+                    raise RuntimeError("업비트 조회 누락: " + ", ".join(missing[:10]))
                 for r in records:
                     observed = prices.get("KRW-" + r["symbol"])
                     if observed is None:
