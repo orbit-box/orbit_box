@@ -312,11 +312,16 @@ async def result_input(update, context):
             WHERE id=? AND result_type IN ('open','stopped')""", (pct, kind, now, rid)
         ).rowcount
         conn.commit()
+        verified = conn.execute("SELECT result_pct,result_type FROM leading_records WHERE id=?", (rid,)).fetchone()
+    if not changed or not verified or verified["result_type"] != kind or verified["result_pct"] != pct:
+        await update.message.reply_text("⚠️ 저장 확인에 실패했습니다. 다시 시도해 주세요.")
+        return TRADE_RESULT
     context.user_data.pop("leading_close_id", None)
     await update.message.reply_text(
         f"{'✅' if changed else '⚠️'} #{rid} {'최종 결과 저장' if changed else '이미 종료된 리딩'}\n최종 수익률: {pct:+.2f}%",
         reply_markup=menu(),
     )
+    await update.message.reply_text("📥 최종 결과가 저장되었습니다. /start → 리딩 기록 불러오기에서 수익만·손실만·전체로 확인할 수 있습니다.")
     return ConversationHandler.END
 
 
@@ -336,6 +341,7 @@ async def callbacks(update, context):
             [InlineKeyboardButton("📈 수익만", callback_data="lead:xlsx:profit"),
              InlineKeyboardButton("📉 손실만", callback_data="lead:xlsx:loss")],
             [InlineKeyboardButton("📋 전체", callback_data="lead:xlsx:all")],
+            [InlineKeyboardButton("🎯 목표 도달 기록", callback_data="lead:xlsx:milestones")],
         ]))
     elif action == "lead:open":
         with connection() as conn:
@@ -351,7 +357,33 @@ async def callbacks(update, context):
             await q.message.reply_text(f"최근 {len(rows)}건 표시 중입니다. 전체 기록은 엑셀로 확인할 수 있습니다.")
     elif action.startswith("lead:xlsx:"):
         kind = action.rsplit(":",1)[-1]
-        if kind not in {"profit", "loss", "all"}:
+        if kind not in {"profit", "loss", "all", "milestones"}:
+            return
+        if kind == "milestones":
+            with connection() as conn:
+                hits=conn.execute("""SELECT a.record_id,r.coin_name,r.symbol,r.entry_price,
+                    a.milestone,a.observed_price,a.notified_at,r.result_pct
+                    FROM leading_alerts a JOIN leading_records r ON r.id=a.record_id
+                    WHERE a.milestone LIKE 'target%' AND a.delivery_status='sent'
+                    ORDER BY a.notified_at DESC""").fetchall()
+            wb=Workbook()
+            ws=wb.active
+            ws.title="목표 도달 내역"
+            ws.append(["종목명","진입가(원)","도달 목표","도달 시세(원)","도달 기준 상승률(%)","도달일시(KST)","최종 확정 수익률(%)"])
+            for h in hits:
+                ws.append([f"{h['coin_name'] or h['symbol']} ({h['symbol']})",h["entry_price"],h["milestone"].replace("target","")+"차",h["observed_price"],pct(h["entry_price"],h["observed_price"]),h["notified_at"],h["result_pct"]])
+            for cell in ws[1]:
+                cell.font=Font(bold=True,color="FFFFFF")
+                cell.fill=PatternFill("solid",fgColor="193553")
+            for col,width in {"A":27,"B":18,"C":15,"D":20,"E":25,"F":25,"G":24}.items():
+                ws.column_dimensions[col].width=width
+            ws.freeze_panes="A2"
+            ws.auto_filter.ref=ws.dimensions
+            data=io.BytesIO()
+            wb.save(data)
+            data.seek(0)
+            filename=f"leading_milestones_{datetime.now(KST).strftime('%Y%m%d_%H%M')}.xlsx"
+            await q.message.reply_document(document=data,filename=filename,caption=f"🎯 목표 도달 기록: {len(hits)}건\n※ 목표 도달은 실제 실현 수익이 아닙니다.")
             return
         sql = "SELECT * FROM leading_records"
         if kind == "profit":
@@ -361,6 +393,7 @@ async def callbacks(update, context):
         sql += " ORDER BY id DESC"
         with connection() as conn:
             rows = conn.execute(sql).fetchall()
+        await q.message.reply_text(f"📊 조회 결과: {len(rows)}건")
         wb = Workbook()
         ws = wb.active
         ws.title = "📊 공유용 요약"
@@ -613,5 +646,5 @@ def install(app, admin_id):
     )
     app.add_handler(add)
     app.add_handler(close)
-    app.add_handler(CallbackQueryHandler(callbacks, pattern=r"^lead:(exports|open|xlsx:(profit|loss|all))$"))
+    app.add_handler(CallbackQueryHandler(callbacks, pattern=r"^lead:(exports|open|xlsx:(profit|loss|all|milestones))$"))
     app.add_handler(CallbackQueryHandler(management_buttons, pattern=r"^lead:(keep|stopask|stopconfirm|stopcancel):\d+$"))
