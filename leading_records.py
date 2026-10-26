@@ -6,6 +6,7 @@ import asyncio
 import json
 import urllib.request
 import time
+import logging
 from urllib.parse import urlencode
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -65,6 +66,8 @@ def setup():
         alert_cols={x["name"] for x in conn.execute("PRAGMA table_info(leading_alerts)")}
         if "delivery_status" not in alert_cols:
             conn.execute("ALTER TABLE leading_alerts ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'sent'")
+        conn.execute("""CREATE TABLE IF NOT EXISTS leading_monitor_health (id INTEGER PRIMARY KEY CHECK(id=1), failure_count INTEGER DEFAULT 0, notice_at TEXT)""")
+        conn.execute("INSERT OR IGNORE INTO leading_monitor_health(id,failure_count) VALUES(1,0)")
         conn.commit()
 
 
@@ -477,20 +480,51 @@ async def monitor_prices(app, admin_id):
                             still_open = conn.execute("SELECT 1 FROM leading_records WHERE id=? AND result_type='open' AND monitor_active=1", (r["id"],)).fetchone()
                         if not still_open:
                             break
-                        await app.bot.send_message(chat_id=admin_id,text=message,parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[
+                        # Reserve alert milestone before network I/O; UNIQUE(record_id,milestone) prevents duplicate sends.
+                        with connection() as conn:
+                            inserted=conn.execute("""INSERT OR IGNORE INTO leading_alerts
+                                (record_id,milestone,notified_at,observed_price,delivery_status)
+                                VALUES(?,?,?,?, 'pending')""",
+                                (r["id"],key,datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),observed)).rowcount
+                            conn.commit()
+                        if not inserted:
+                            continue
+                        try:
+                            await app.bot.send_message(chat_id=admin_id,text=message,parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[
                             InlineKeyboardButton("🔔 알림 유지", callback_data=f"lead:keep:{r['id']}"),
                             InlineKeyboardButton("⏹ 알림 종료", callback_data=f"lead:stopask:{r['id']}")
                         ]]))
+                        except Exception:
+                            # If Telegram times out after accepting the message, retry may duplicate.
+                            # Keep pending for manual inspection instead of blind resend.
+                            logging.getLogger(__name__).exception("Leading alert delivery uncertain %s/%s",r["id"],key)
+                            raise
                         with connection() as conn:
-                            conn.execute("INSERT OR IGNORE INTO leading_alerts(record_id,milestone,notified_at,observed_price) VALUES(?,?,?,?)",
-                                         (r["id"],key,datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),observed))
+                            conn.execute("UPDATE leading_alerts SET delivery_status='sent' WHERE record_id=? AND milestone=?",(r["id"],key))
                             conn.commit()
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            import logging
             logging.getLogger(__name__).exception("Leading price monitor failed: %s",error)
-        await asyncio.sleep(10)
+            now=datetime.now(KST)
+            with connection() as conn:
+                conn.execute("UPDATE leading_monitor_health SET failure_count=failure_count+1 WHERE id=1")
+                health=conn.execute("SELECT failure_count,notice_at FROM leading_monitor_health WHERE id=1").fetchone()
+                conn.commit()
+            previous=datetime.strptime(health["notice_at"],"%Y-%m-%d %H:%M:%S").replace(tzinfo=KST) if health["notice_at"] else None
+            if health["failure_count"]>=3 and (previous is None or (now-previous).total_seconds()>1800):
+                try:
+                    await app.bot.send_message(admin_id,"⚠️ 업비트 시세 감시 오류: 3회 이상 연속 조회/알림에 실패했습니다. 운영자가 확인해 주세요.")
+                    with connection() as conn:
+                        conn.execute("UPDATE leading_monitor_health SET notice_at=? WHERE id=1",(now.strftime("%Y-%m-%d %H:%M:%S"),))
+                        conn.commit()
+                except Exception:
+                    logging.getLogger(__name__).exception("Monitor health notification failed")
+        else:
+            with connection() as conn:
+                conn.execute("UPDATE leading_monitor_health SET failure_count=0 WHERE id=1")
+                conn.commit()
+        await asyncio.sleep(3)
 
 
 async def start_monitor(app, admin_id):
