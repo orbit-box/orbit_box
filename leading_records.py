@@ -385,15 +385,20 @@ async def callbacks(update, context):
             filename=f"leading_milestones_{datetime.now(KST).strftime('%Y%m%d_%H%M')}.xlsx"
             await q.message.reply_document(document=data,filename=filename,caption=f"🎯 목표 도달 기록: {len(hits)}건\n※ 목표 도달은 실제 실현 수익이 아닙니다.")
             return
-        sql = "SELECT * FROM leading_records"
+        sql = """SELECT r.*,
+            (SELECT MAX(CAST(SUBSTR(a.milestone,7) AS INTEGER))
+             FROM leading_alerts a
+             WHERE a.record_id=r.id AND a.milestone IN ('target1','target2','target3')
+               AND a.delivery_status='sent') AS achieved_level
+            FROM leading_records r"""
         if kind == "profit":
-            sql += " WHERE result_type='profit'"
+            sql += " WHERE r.result_type='profit' OR EXISTS (SELECT 1 FROM leading_alerts a WHERE a.record_id=r.id AND a.milestone IN ('target1','target2','target3') AND a.delivery_status='sent')"
         elif kind == "loss":
-            sql += " WHERE result_type='loss'"
-        sql += " ORDER BY id DESC"
+            sql += " WHERE r.result_type='loss'"
+        sql += " ORDER BY r.id DESC"
         with connection() as conn:
             rows = conn.execute(sql).fetchall()
-        await q.message.reply_text(f"📊 조회 결과: {len(rows)}건")
+        await q.message.reply_text(f"📊 조회 결과: {len(rows)}개 종목 (1차 이상 목표 달성은 수익 내역에 포함)")
         wb = Workbook()
         ws = wb.active
         ws.title = "📊 공유용 요약"
@@ -405,11 +410,11 @@ async def callbacks(update, context):
         ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[1].height = 40
         ws.merge_cells("A2:D2")
-        ws["A2"] = "기준: 업비트 KRW | 최종 기록 수익률은 입력된 값이며 실제 개인 수익률과 다를 수 있습니다."
+        ws["A2"] = "업비트 KRW 기준 · 목표 도달 상승률과 최종 실현 수익률은 다릅니다."
         ws["A2"].font = Font(size=9, color="64748B")
         ws["A2"].alignment = Alignment(horizontal="center")
         ws.row_dimensions[2].height = 25
-        ws.append(["종목명", "진입가 (원)", "최종 수익률", "결과"])
+        ws.append(["종목명", "진입가 (원)", "기록 수익률", "결과"])
         header = 3
         labels = {"profit":"수익", "loss":"손실", "breakeven":"본전", "open":"진행중", "stopped":"감시종료"}
         for cell in ws[header]:
@@ -418,7 +423,12 @@ async def callbacks(update, context):
             cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[header].height = 30
         for idx, r in enumerate(rows, 4):
-            ws.append([f"{r['coin_name'] or r['symbol']} ({r['symbol']})", r["entry_price"], r["result_pct"], labels[r["result_type"]]])
+            achieved = r["achieved_level"]
+            rate = pct(r["entry_price"], target_price(r, achieved)) if achieved else r["result_pct"]
+            state = f"{achieved}차 목표 도달" if achieved else labels[r["result_type"]]
+            if r["result_type"] == "profit" and not achieved:
+                state = "수익 확정"
+            ws.append([f"{r['coin_name'] or r['symbol']} ({r['symbol']})", r["entry_price"], rate, state])
             ws.row_dimensions[idx].height = 29
             shade = "FFFFFF" if idx % 2 == 0 else "EFF4F9"
             for cell in ws[idx]:
@@ -427,7 +437,7 @@ async def callbacks(update, context):
                 cell.font = Font(size=11, color="243447")
             ws.cell(idx,2).number_format = '#,##0.########'
             ws.cell(idx,3).number_format = '+0.00"%;";-0.00"%";0.00"%"'
-            if r["result_type"] == "profit":
+            if achieved or r["result_type"] == "profit":
                 ws.cell(idx,3).font = Font(bold=True,color="00835A")
             elif r["result_type"] == "loss":
                 ws.cell(idx,3).font = Font(bold=True,color="C83C48")
@@ -443,7 +453,7 @@ async def callbacks(update, context):
         detail = wb.create_sheet("상세 기록")
         detail.append(["번호","종목명","티커","진입가","최종수익률(%)","결과","1차목표가","1차 예상(%)","2차목표가","2차 예상(%)","3차목표가","3차 예상(%)","손절가","손절 예상(%)","등록(KST)","종료(KST)"])
         for r in rows:
-            detail.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (target_price(r,i),pct(r["entry_price"],target_price(r,i)))],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
+            detail.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],(f"{r['achieved_level']}차 목표 도달 / "+labels[r["result_type"]]) if r["achieved_level"] else labels[r["result_type"]],*[v for i in range(1,4) for v in (target_price(r,i),pct(r["entry_price"],target_price(r,i)))],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
         for cell in detail[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="193553")
