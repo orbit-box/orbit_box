@@ -93,7 +93,7 @@ def detail_text(r):
     stop = r["stop_price"]
     lines.append(f"🛑 손절가: {fmt(stop)}원" + (f"  <b>({(stop/p-1)*100:+.2f}%)</b>" if stop else ""))
     lines.append("⚠️ 과거 수익률 기준 기록" if r["target_mode"] != "price" else "📡 업비트 KRW 시세 감시 중")
-    lines.append("📍 상태: 진행 중" if r["result_type"] == "open" else f"📍 최종 수익률: {r['result_pct']:+.2f}%")
+    lines.append("📍 상태: 진행 중" if r["result_type"] == "open" else ("📍 상태: 감시 종료" if r["result_type"] == "stopped" else f"📍 최종 수익률: {r['result_pct']:+.2f}%"))
     return "\n".join(lines)
 
 
@@ -336,7 +336,7 @@ async def callbacks(update, context):
             return
         await q.message.reply_text(f"📊 <b>진행 중인 리딩</b> · 총 {count}건\n종목별 목표가와 예상 수익률입니다.", parse_mode="HTML")
         for record in rows:
-            await q.message.reply_text(detail_text(record), parse_mode="HTML")
+            await q.message.reply_text(detail_text(record), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏹ 리딩 감시 종료", callback_data=f"lead:stopask:{record['id']}")]]))
         if count > len(rows):
             await q.message.reply_text(f"최근 {len(rows)}건 표시 중입니다. 전체 기록은 엑셀로 확인할 수 있습니다.")
     elif action.startswith("lead:xlsx:"):
@@ -355,7 +355,7 @@ async def callbacks(update, context):
         ws = wb.active
         ws.title = {"profit":"수익 기록","loss":"손실 기록","all":"전체 리딩"}[kind]
         ws.append(["기록번호", "종목명", "티커", "진입가", "최종수익률(%)", "결과", "1차 목표가", "1차 예상수익률(%)", "2차 목표가", "2차 예상수익률(%)", "3차 목표가", "3차 예상수익률(%)", "손절가", "손절 예상수익률(%)", "등록일시(KST)", "종료일시(KST)"])
-        labels = {"profit":"수익", "loss":"손실", "breakeven":"본전", "open":"진행중"}
+        labels = {"profit":"수익", "loss":"손실", "breakeven":"본전", "open":"진행중", "stopped":"감시종료"}
         for r in rows:
             ws.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (target_price(r,i),pct(r["entry_price"],target_price(r,i)))],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
         for cell in ws[1]:
@@ -423,7 +423,14 @@ async def monitor_prices(app, admin_id):
                                    f"조회 현재가: {fmt(observed)}원 ({pct(r['entry_price'],observed):+.2f}%)\n\n"
                                    "📢 관리자 확인 및 안내가 필요합니다.\n"
                                    "※ 업비트 KRW 조회 시세 기준, 체결 수익률이 아닙니다.")
-                        await app.bot.send_message(chat_id=admin_id,text=message,parse_mode="HTML")
+                        with connection() as conn:
+                            still_open = conn.execute("SELECT 1 FROM leading_records WHERE id=? AND result_type='open'", (r["id"],)).fetchone()
+                        if not still_open:
+                            break
+                        await app.bot.send_message(chat_id=admin_id,text=message,parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔔 알림 유지", callback_data=f"lead:keep:{r['id']}"),
+                            InlineKeyboardButton("⏹ 알림 종료", callback_data=f"lead:stopask:{r['id']}")
+                        ]]))
                         with connection() as conn:
                             conn.execute("INSERT OR IGNORE INTO leading_alerts(record_id,milestone,notified_at,observed_price) VALUES(?,?,?,?)",
                                          (r["id"],key,datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),observed))
@@ -438,6 +445,50 @@ async def monitor_prices(app, admin_id):
 
 async def start_monitor(app, admin_id):
     app.create_task(monitor_prices(app,admin_id))
+
+
+async def management_buttons(update, context):
+    q = update.callback_query
+    await q.answer()
+    kind, record_id = q.data.split(":")[1:3]
+    record_id = int(record_id)
+    with connection() as conn:
+        row = conn.execute("SELECT * FROM leading_records WHERE id=?", (record_id,)).fetchone()
+    if not row:
+        await q.answer("기록을 찾을 수 없습니다.", show_alert=True)
+        return
+    if kind == "keep":
+        if row["result_type"] == "open":
+            await q.message.reply_text(f"🔔 #{record_id} {coin_label(row)}\n알림을 유지합니다. 남은 목표가 및 손절가를 계속 감시합니다.")
+        else:
+            await q.message.reply_text("이미 종료된 리딩입니다. 기존 기록은 유지됩니다.")
+    elif kind == "stopask":
+        if row["result_type"] != "open":
+            await q.message.reply_text("이미 종료된 리딩입니다.")
+            return
+        await q.message.reply_text(
+            f"⏹ #{record_id} {coin_label(row)}\n정말 리딩 감시를 종료하시겠습니까?\n\n종료하면 이후 목표가·손절가 알림은 발송되지 않습니다. 엑셀 기록은 보존됩니다.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ 감시 종료 확정", callback_data=f"lead:stopconfirm:{record_id}"),
+                InlineKeyboardButton("↩️ 취소", callback_data=f"lead:stopcancel:{record_id}")
+            ]])
+        )
+    elif kind == "stopcancel":
+        await q.edit_message_reply_markup(reply_markup=None)
+        await q.message.reply_text(f"↩️ #{record_id} 감시 종료를 취소했습니다.")
+    elif kind == "stopconfirm":
+        now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+        with connection() as conn:
+            updated = conn.execute(
+                "UPDATE leading_records SET result_type='stopped', closed_at=? WHERE id=? AND result_type='open'",
+                (now, record_id)
+            ).rowcount
+            conn.commit()
+        await q.edit_message_reply_markup(reply_markup=None)
+        if updated:
+            await q.message.reply_text(f"⏹ #{record_id} {coin_label(row)} 리딩 감시를 종료했습니다.\n이후 알림은 중단되며 과거 기록은 엑셀에 남습니다.")
+        else:
+            await q.message.reply_text("이미 종료된 리딩입니다.")
 
 
 def install(app, admin_id):
@@ -476,3 +527,4 @@ def install(app, admin_id):
     app.add_handler(add)
     app.add_handler(close)
     app.add_handler(CallbackQueryHandler(callbacks, pattern=r"^lead:(exports|open|xlsx:(profit|loss|all))$"))
+    app.add_handler(CallbackQueryHandler(management_buttons, pattern=r"^lead:(keep|stopask|stopconfirm|stopcancel):\d+$"))
