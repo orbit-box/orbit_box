@@ -6,6 +6,7 @@ import asyncio
 import json
 import urllib.request
 import time
+from urllib.parse import urlencode
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from html import escape
@@ -49,7 +50,28 @@ def setup():
             conn.execute("ALTER TABLE leading_records ADD COLUMN coin_name TEXT")
         if "stop_price" not in fields:
             conn.execute("ALTER TABLE leading_records ADD COLUMN stop_price REAL")
+        fields = {x["name"] for x in conn.execute("PRAGMA table_info(leading_records)").fetchall()}
+        if "target_mode" not in fields:
+            conn.execute("ALTER TABLE leading_records ADD COLUMN target_mode TEXT NOT NULL DEFAULT 'pct'")
+        conn.execute("""CREATE TABLE IF NOT EXISTS leading_alerts (
+            record_id INTEGER NOT NULL, milestone TEXT NOT NULL,
+            notified_at TEXT NOT NULL, observed_price REAL NOT NULL,
+            PRIMARY KEY(record_id,milestone)
+        )""")
         conn.commit()
+
+
+def pct(entry, price):
+    return (price / entry - 1) * 100
+
+
+def target_price(r, n):
+    v = r[f"target{n}"]
+    return v if r["target_mode"] == "price" else r["entry_price"] * (1+v/100)
+
+
+def price_number(v):
+    return f"{v:,.8f}".rstrip("0").rstrip(".") if v is not None else "미설정"
 
 
 def fmt(v):
@@ -66,10 +88,11 @@ def detail_text(r):
     lines = [f"📌 <b>#{r['id']} {escape(coin_label(r))}</b>",
              f"💰 진입가: <b>{fmt(p)}원</b>"]
     for i in range(1, 4):
-        pct = r[f"target{i}"]
-        lines.append(f"🎯 {i}차 목표: {fmt(p*(1+pct/100))}원  <b>(+{fmt(pct)}%)</b>")
+        target = target_price(r, i)
+        lines.append(f"🎯 {i}차: <b>{fmt(target)}원</b>  ({pct(p,target):+.2f}%)")
     stop = r["stop_price"]
     lines.append(f"🛑 손절가: {fmt(stop)}원" + (f"  <b>({(stop/p-1)*100:+.2f}%)</b>" if stop else ""))
+    lines.append("⚠️ 과거 수익률 기준 기록" if r["target_mode"] != "price" else "📡 업비트 KRW 시세 감시 중")
     lines.append("📍 상태: 진행 중" if r["result_type"] == "open" else f"📍 최종 수익률: {r['result_pct']:+.2f}%")
     return "\n".join(lines)
 
@@ -172,45 +195,39 @@ async def receive_entry(update, context):
         await update.message.reply_text("0보다 큰 진입가를 숫자로 입력해 주세요.")
         return TRADE_ENTRY
     context.user_data["leading_form"]["entry_price"] = p
-    await update.message.reply_text("1차 목표 수익률(%)을 입력하세요. 예: 5")
+    await update.message.reply_text("🎯 1차 목표가(원)를 입력하세요. 예: 2100\n진입가보다 높은 가격을 입력하세요.")
     return TRADE_T1
 
 
-async def goal_step(update, context, key, current, next_state, next_message):
+async def goal_step(update, context, index):
+    d = context.user_data["leading_form"]
     try:
-        v = parse_positive(update.message.text)
-        if v > 100000:
-            raise ValueError()
-        prev = context.user_data["leading_form"].get("target" + str(int(key[-1])-1))
-        if prev is not None and v <= prev:
+        value = parse_positive(update.message.text)
+        prev = d["entry_price"] if index == 1 else d[f"target{index-1}"]
+        if value <= prev:
             raise ValueError()
     except (ValueError, OverflowError):
-        await update.message.reply_text("이전 목표보다 높은 양수 수익률(%)을 입력해 주세요.")
-        return current
-    context.user_data["leading_form"][key] = v
-    await update.message.reply_text(next_message)
-    return next_state
+        await update.message.reply_text("이전 목표가보다 높은 원화 목표 가격을 입력해 주세요.")
+        return [TRADE_T1, TRADE_T2, TRADE_T3][index-1]
+    d[f"target{index}"] = value
+    ratio = pct(d["entry_price"], value)
+    if index == 3:
+        await update.message.reply_text(f"✅ 3차 목표: {fmt(value)}원 ({ratio:+.2f}%)\n\n🛑 손절가(원)를 입력하세요. 진입가보다 낮아야 합니다.")
+        return TRADE_STOP
+    await update.message.reply_text(f"✅ {index}차 목표: {fmt(value)}원 ({ratio:+.2f}%)\n\n🎯 {index+1}차 목표가(원)를 입력하세요.")
+    return [TRADE_T2, TRADE_T3][index-1]
 
 
 async def goal1(update, context):
-    return await goal_step(update, context, "target1", TRADE_T1, TRADE_T2, "2차 목표 수익률(%)을 입력하세요. 예: 10")
+    return await goal_step(update, context, 1)
 
 
 async def goal2(update, context):
-    return await goal_step(update, context, "target2", TRADE_T2, TRADE_T3, "3차 목표 수익률(%)을 입력하세요. 예: 15")
+    return await goal_step(update, context, 2)
 
 
 async def goal3(update, context):
-    try:
-        v = parse_positive(update.message.text)
-        if v <= context.user_data["leading_form"]["target2"] or v > 100000:
-            raise ValueError()
-    except (ValueError, OverflowError):
-        await update.message.reply_text("2차 목표보다 높은 수익률(%)을 입력해 주세요.")
-        return TRADE_T3
-    context.user_data["leading_form"]["target3"] = v
-    await update.message.reply_text("🛑 손절가(원)를 입력하세요.\n예: 1850\n진입가보다 낮은 가격을 입력해 주세요.")
-    return TRADE_STOP
+    return await goal_step(update, context, 3)
 
 
 async def receive_stop(update, context):
@@ -227,9 +244,9 @@ async def receive_stop(update, context):
     with connection() as conn:
         cursor = conn.execute(
             """INSERT INTO leading_records
-            (symbol,coin_name,entry_price,target1,target2,target3,stop_price,created_at,creator_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (d["symbol"],d["coin_name"],d["entry_price"],d["target1"],d["target2"],d["target3"],stop,now,update.effective_user.id))
+            (symbol,coin_name,entry_price,target1,target2,target3,stop_price,created_at,creator_id,target_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (d["symbol"],d["coin_name"],d["entry_price"],d["target1"],d["target2"],d["target3"],stop,now,update.effective_user.id,"price"))
         record_id = cursor.lastrowid
         conn.commit()
         record = conn.execute("SELECT * FROM leading_records WHERE id=?", (record_id,)).fetchone()
@@ -340,7 +357,7 @@ async def callbacks(update, context):
         ws.append(["기록번호", "종목명", "티커", "진입가", "최종수익률(%)", "결과", "1차 목표가", "1차 예상수익률(%)", "2차 목표가", "2차 예상수익률(%)", "3차 목표가", "3차 예상수익률(%)", "손절가", "손절 예상수익률(%)", "등록일시(KST)", "종료일시(KST)"])
         labels = {"profit":"수익", "loss":"손실", "breakeven":"본전", "open":"진행중"}
         for r in rows:
-            ws.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (r["entry_price"]*(1+r[f"target{i}"]/100),r[f"target{i}"])],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
+            ws.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (target_price(r,i),pct(r["entry_price"],target_price(r,i)))],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
         for cell in ws[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="183153")
@@ -360,8 +377,78 @@ async def callbacks(update, context):
         await q.message.reply_document(document=output, filename=output.name, caption=f"📥 {ws.title}: {len(rows)}건\n※ 미종료 리딩은 전체 파일에만 포함됩니다.")
 
 
+
+def get_prices(markets):
+    values = {}
+    items = sorted(markets)
+    for offset in range(0, len(items), 70):
+        query = urlencode({"markets": ",".join(items[offset:offset+70])})
+        req = urllib.request.Request("https://api.upbit.com/v1/ticker?" + query, headers={"User-Agent": "BasecampBot/1.0", "Accept":"application/json"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.load(resp)
+        for item in rows:
+            if item.get("market") and item.get("trade_price") is not None:
+                values[item["market"]] = float(item["trade_price"])
+    return values
+
+
+async def monitor_prices(app, admin_id):
+    # Sequential cycle; successful messages are idempotently recorded in SQLite.
+    while True:
+        try:
+            with connection() as conn:
+                records = conn.execute("SELECT * FROM leading_records WHERE result_type='open' AND target_mode='price'").fetchall()
+            if records:
+                prices = await asyncio.to_thread(get_prices, {"KRW-" + r["symbol"] for r in records})
+                for r in records:
+                    observed = prices.get("KRW-" + r["symbol"])
+                    if observed is None:
+                        continue
+                    levels = [(f"target{i}", target_price(r,i), observed >= target_price(r,i)) for i in range(1,4)]
+                    if r["stop_price"] is not None:
+                        levels.append(("stop", r["stop_price"], observed <= r["stop_price"]))
+                    for key, level, hit in levels:
+                        if not hit:
+                            continue
+                        with connection() as conn:
+                            already = conn.execute("SELECT 1 FROM leading_alerts WHERE record_id=? AND milestone=?", (r["id"],key)).fetchone()
+                        if already:
+                            continue
+                        desc = f"🎯 {key[-1]}차 목표 도달" if key != "stop" else "🛑 손절가 도달"
+                        message = (f"🔔 <b>리딩 가격 도달 알림</b>\n\n"
+                                   f"📌 <b>#{r['id']} {escape(coin_label(r))}</b>\n"
+                                   f"📍 {desc}\n"
+                                   f"진입가: {fmt(r['entry_price'])}원\n"
+                                   f"설정 가격: {fmt(level)}원 ({pct(r['entry_price'],level):+.2f}%)\n"
+                                   f"조회 현재가: {fmt(observed)}원 ({pct(r['entry_price'],observed):+.2f}%)\n\n"
+                                   "📢 관리자 확인 및 안내가 필요합니다.\n"
+                                   "※ 업비트 KRW 조회 시세 기준, 체결 수익률이 아닙니다.")
+                        await app.bot.send_message(chat_id=admin_id,text=message,parse_mode="HTML")
+                        with connection() as conn:
+                            conn.execute("INSERT OR IGNORE INTO leading_alerts(record_id,milestone,notified_at,observed_price) VALUES(?,?,?,?)",
+                                         (r["id"],key,datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),observed))
+                            conn.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            import logging
+            logging.getLogger(__name__).exception("Leading price monitor failed: %s",error)
+        await asyncio.sleep(10)
+
+
+async def start_monitor(app, admin_id):
+    app.create_task(monitor_prices(app,admin_id))
+
+
 def install(app, admin_id):
     setup()
+    # Runs after PTB initialization during polling startup, without extra scheduler dependencies.
+    old_post_init = app.post_init
+    async def on_init(application):
+        if old_post_init:
+            await old_post_init(application)
+        await start_monitor(application,admin_id)
+    app.post_init = on_init
     admin_chat = filters.Chat(admin_id)
     app.add_handler(CommandHandler("start", start_admin, filters=admin_chat))
     add = ConversationHandler(
