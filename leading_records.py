@@ -16,7 +16,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 
 KST = ZoneInfo("Asia/Seoul")
-TRADE_SYMBOL, TRADE_ENTRY, TRADE_T1, TRADE_T2, TRADE_T3, TRADE_RESULT = range(30, 36)
+TRADE_SYMBOL, TRADE_ENTRY, TRADE_T1, TRADE_T2, TRADE_T3, TRADE_RESULT, TRADE_STOP = range(30, 37)
 _MARKET_CACHE = {"at": 0, "data": []}
 
 
@@ -44,7 +44,34 @@ def setup():
                 creator_id INTEGER NOT NULL
             )
         """)
+        fields = {x["name"] for x in conn.execute("PRAGMA table_info(leading_records)").fetchall()}
+        if "coin_name" not in fields:
+            conn.execute("ALTER TABLE leading_records ADD COLUMN coin_name TEXT")
+        if "stop_price" not in fields:
+            conn.execute("ALTER TABLE leading_records ADD COLUMN stop_price REAL")
         conn.commit()
+
+
+def fmt(v):
+    return f"{v:,.8f}".rstrip("0").rstrip(".") if v is not None else "미설정"
+
+
+def coin_label(r):
+    name = r["coin_name"] if r["coin_name"] else r["symbol"]
+    return f"{name} ({r['symbol']})" if name != r["symbol"] else name
+
+
+def detail_text(r):
+    p = r["entry_price"]
+    lines = [f"📌 <b>#{r['id']} {escape(coin_label(r))}</b>",
+             f"💰 진입가: <b>{fmt(p)}원</b>"]
+    for i in range(1, 4):
+        pct = r[f"target{i}"]
+        lines.append(f"🎯 {i}차 목표: {fmt(p*(1+pct/100))}원  <b>(+{fmt(pct)}%)</b>")
+    stop = r["stop_price"]
+    lines.append(f"🛑 손절가: {fmt(stop)}원" + (f"  <b>({(stop/p-1)*100:+.2f}%)</b>" if stop else ""))
+    lines.append("📍 상태: 진행 중" if r["result_type"] == "open" else f"📍 최종 수익률: {r['result_pct']:+.2f}%")
+    return "\n".join(lines)
 
 
 def allowed(update, admin_id):
@@ -100,7 +127,8 @@ async def pick_symbol(update, context):
     await q.edit_message_reply_markup(reply_markup=None)
     symbol = choice["market"].split("-")[1]
     form["symbol"] = symbol
-    await q.message.reply_text(f"✅ {symbol} 선택 완료\n진입가(원)를 숫자로 입력하세요. 예: 2000")
+    form["coin_name"] = choice.get("korean_name") or symbol
+    await q.message.reply_text(f"✅ {form['coin_name']} ({symbol}) 선택 완료\n진입가(원)를 숫자로 입력하세요. 예: 2000")
     return TRADE_ENTRY
 
 async def begin_add(update, context):
@@ -180,25 +208,33 @@ async def goal3(update, context):
     except (ValueError, OverflowError):
         await update.message.reply_text("2차 목표보다 높은 수익률(%)을 입력해 주세요.")
         return TRADE_T3
+    context.user_data["leading_form"]["target3"] = v
+    await update.message.reply_text("🛑 손절가(원)를 입력하세요.\n예: 1850\n진입가보다 낮은 가격을 입력해 주세요.")
+    return TRADE_STOP
+
+
+async def receive_stop(update, context):
     d = context.user_data["leading_form"]
-    d["target3"] = v
+    try:
+        stop = parse_positive(update.message.text)
+        if stop >= d["entry_price"]:
+            raise ValueError()
+    except (ValueError, OverflowError):
+        await update.message.reply_text("손절가는 진입가보다 낮은 양수 가격으로 입력해 주세요.")
+        return TRADE_STOP
+    d["stop_price"] = stop
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     with connection() as conn:
         cursor = conn.execute(
             """INSERT INTO leading_records
-            (symbol, entry_price, target1, target2, target3, created_at, creator_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (d["symbol"], d["entry_price"], d["target1"], d["target2"], d["target3"], now, update.effective_user.id),
-        )
+            (symbol,coin_name,entry_price,target1,target2,target3,stop_price,created_at,creator_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (d["symbol"],d["coin_name"],d["entry_price"],d["target1"],d["target2"],d["target3"],stop,now,update.effective_user.id))
         record_id = cursor.lastrowid
         conn.commit()
+        record = conn.execute("SELECT * FROM leading_records WHERE id=?", (record_id,)).fetchone()
     context.user_data.pop("leading_form", None)
-    await update.message.reply_text(
-        f"✅ 리딩 #{record_id} 등록 완료\n종목: {d['symbol']}\n진입가: {d['entry_price']:,.8g}\n"
-        f"목표: +{d['target1']}% / +{d['target2']}% / +{d['target3']}%\n"
-        "※ 현재 이 기능은 등록 및 수익·손절 기록 관리용입니다. 실시간 가격 자동감시는 별도 연동이 필요합니다.",
-        reply_markup=menu(),
-    )
+    await update.message.reply_text("✅ 리딩 등록 완료\n\n" + detail_text(record) + "\n\n※ 목표별 예상 수익률은 진입가 대비 가격 상승률이며 수수료는 제외합니다.", parse_mode="HTML", reply_markup=menu())
     return ConversationHandler.END
 
 
@@ -276,9 +312,16 @@ async def callbacks(update, context):
         ]))
     elif action == "lead:open":
         with connection() as conn:
-            rows = conn.execute("SELECT id,symbol,entry_price,target1,target2,target3 FROM leading_records WHERE result_type='open' ORDER BY id DESC LIMIT 30").fetchall()
-        msg = "📊 진행 중인 리딩 (최근 30건)\n\n" + ("\n".join(f"#{r['id']} {r['symbol']} | 진입 {r['entry_price']:,.8g} | 목표 +{r['target1']}/+{r['target2']}/+{r['target3']}%" for r in rows) if rows else "등록된 리딩이 없습니다.")
-        await q.message.reply_text(msg[:4000])
+            rows = conn.execute("SELECT * FROM leading_records WHERE result_type='open' ORDER BY id DESC LIMIT 20").fetchall()
+            count = conn.execute("SELECT COUNT(*) FROM leading_records WHERE result_type='open'").fetchone()[0]
+        if not rows:
+            await q.message.reply_text("📊 진행 중인 리딩이 없습니다.")
+            return
+        await q.message.reply_text(f"📊 <b>진행 중인 리딩</b> · 총 {count}건\n종목별 목표가와 예상 수익률입니다.", parse_mode="HTML")
+        for record in rows:
+            await q.message.reply_text(detail_text(record), parse_mode="HTML")
+        if count > len(rows):
+            await q.message.reply_text(f"최근 {len(rows)}건 표시 중입니다. 전체 기록은 엑셀로 확인할 수 있습니다.")
     elif action.startswith("lead:xlsx:"):
         kind = action.rsplit(":",1)[-1]
         if kind not in {"profit", "loss", "all"}:
@@ -294,20 +337,20 @@ async def callbacks(update, context):
         wb = Workbook()
         ws = wb.active
         ws.title = {"profit":"수익 기록","loss":"손실 기록","all":"전체 리딩"}[kind]
-        ws.append(["기록번호", "종목명", "진입가", "수익률(%)", "결과", "1차 목표(%)", "2차 목표(%)", "3차 목표(%)", "등록일시(KST)", "종료일시(KST)"])
+        ws.append(["기록번호", "종목명", "티커", "진입가", "최종수익률(%)", "결과", "1차 목표가", "1차 예상수익률(%)", "2차 목표가", "2차 예상수익률(%)", "3차 목표가", "3차 예상수익률(%)", "손절가", "손절 예상수익률(%)", "등록일시(KST)", "종료일시(KST)"])
         labels = {"profit":"수익", "loss":"손실", "breakeven":"본전", "open":"진행중"}
         for r in rows:
-            ws.append([r["id"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],r["target1"],r["target2"],r["target3"],r["created_at"],r["closed_at"]])
+            ws.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (r["entry_price"]*(1+r[f"target{i}"]/100),r[f"target{i}"])],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
         for cell in ws[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="183153")
             cell.alignment = Alignment(horizontal="center")
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
-        for col, width in {"A":12,"B":17,"C":19,"D":16,"E":13,"F":18,"G":18,"H":18,"I":24,"J":24}.items():
+        for col, width in {"A":12,"B":19,"C":15,"D":19,"E":19,"F":13,"G":18,"H":21,"I":18,"J":21,"K":18,"L":21,"M":18,"N":22,"O":24,"P":24}.items():
             ws.column_dimensions[col].width = width
         for row in ws.iter_rows(min_row=2):
-            for idx in [3,5,6,7]:
+            for idx in [4,7,9,11,13]:
                 row[idx].number_format = '0.00"%"'
         output = io.BytesIO()
         wb.save(output)
@@ -329,6 +372,7 @@ def install(app, admin_id):
             TRADE_T1:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, goal1)],
             TRADE_T2:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, goal2)],
             TRADE_T3:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, goal3)],
+            TRADE_STOP:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, receive_stop)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=True, per_user=True,
