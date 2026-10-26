@@ -353,28 +353,71 @@ async def callbacks(update, context):
             rows = conn.execute(sql).fetchall()
         wb = Workbook()
         ws = wb.active
-        ws.title = {"profit":"수익 기록","loss":"손실 기록","all":"전체 리딩"}[kind]
-        ws.append(["기록번호", "종목명", "티커", "진입가", "최종수익률(%)", "결과", "1차 목표가", "1차 예상수익률(%)", "2차 목표가", "2차 예상수익률(%)", "3차 목표가", "3차 예상수익률(%)", "손절가", "손절 예상수익률(%)", "등록일시(KST)", "종료일시(KST)"])
+        ws.title = "📊 공유용 요약"
+        ws.sheet_view.showGridLines = False
+        ws.merge_cells("A1:D1")
+        ws["A1"] = "리딩 성과 기록"
+        ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
+        ws["A1"].fill = PatternFill("solid", fgColor="132C4A")
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 40
+        ws.merge_cells("A2:D2")
+        ws["A2"] = "기준: 업비트 KRW | 최종 기록 수익률은 입력된 값이며 실제 개인 수익률과 다를 수 있습니다."
+        ws["A2"].font = Font(size=9, color="64748B")
+        ws["A2"].alignment = Alignment(horizontal="center")
+        ws.row_dimensions[2].height = 25
+        ws.append(["종목명", "진입가 (원)", "최종 수익률", "결과"])
+        header = 3
         labels = {"profit":"수익", "loss":"손실", "breakeven":"본전", "open":"진행중", "stopped":"감시종료"}
+        for cell in ws[header]:
+            cell.fill = PatternFill("solid", fgColor="193553")
+            cell.font = Font(bold=True, color="FFFFFF", size=11)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[header].height = 30
+        for idx, r in enumerate(rows, 4):
+            ws.append([f"{r['coin_name'] or r['symbol']} ({r['symbol']})", r["entry_price"], r["result_pct"], labels[r["result_type"]]])
+            ws.row_dimensions[idx].height = 29
+            shade = "FFFFFF" if idx % 2 == 0 else "EFF4F9"
+            for cell in ws[idx]:
+                cell.fill = PatternFill("solid", fgColor=shade)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.font = Font(size=11, color="243447")
+            ws.cell(idx,2).number_format = '#,##0.########'
+            ws.cell(idx,3).number_format = '+0.00"%;";-0.00"%";0.00"%"'
+            if r["result_type"] == "profit":
+                ws.cell(idx,3).font = Font(bold=True,color="00835A")
+            elif r["result_type"] == "loss":
+                ws.cell(idx,3).font = Font(bold=True,color="C83C48")
+        for letter, width in {"A":27,"B":21,"C":22,"D":17}.items():
+            ws.column_dimensions[letter].width = width
+        ws.freeze_panes = "A4"
+        ws.print_options.horizontalCentered = True
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.print_area = f"A1:D{max(3,ws.max_row)}"
+
+        detail = wb.create_sheet("상세 기록")
+        detail.append(["번호","종목명","티커","진입가","최종수익률(%)","결과","1차목표가","1차 예상(%)","2차목표가","2차 예상(%)","3차목표가","3차 예상(%)","손절가","손절 예상(%)","등록(KST)","종료(KST)"])
         for r in rows:
-            ws.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (target_price(r,i),pct(r["entry_price"],target_price(r,i)))],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
-        for cell in ws[1]:
+            detail.append([r["id"],r["coin_name"] or r["symbol"],r["symbol"],r["entry_price"],r["result_pct"],labels[r["result_type"]],*[v for i in range(1,4) for v in (target_price(r,i),pct(r["entry_price"],target_price(r,i)))],r["stop_price"],((r["stop_price"]/r["entry_price"]-1)*100 if r["stop_price"] else None),r["created_at"],r["closed_at"]])
+        for cell in detail[1]:
             cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="183153")
+            cell.fill = PatternFill("solid", fgColor="193553")
             cell.alignment = Alignment(horizontal="center")
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        for col, width in {"A":12,"B":19,"C":15,"D":19,"E":19,"F":13,"G":18,"H":21,"I":18,"J":21,"K":18,"L":21,"M":18,"N":22,"O":24,"P":24}.items():
-            ws.column_dimensions[col].width = width
-        for row in ws.iter_rows(min_row=2):
-            for idx in [4,7,9,11,13]:
-                row[idx].number_format = '0.00"%"'
+        detail.freeze_panes = "D2"
+        detail.auto_filter.ref = detail.dimensions
+        for col, width in {"A":10,"B":19,"C":14,"D":18,"E":20,"F":13,"G":17,"H":17,"I":17,"J":17,"K":17,"L":17,"M":17,"N":17,"O":23,"P":23}.items():
+            detail.column_dimensions[col].width = width
+        for row in detail.iter_rows(min_row=2):
+            for index in [4,7,9,11,13]:
+                row[index].number_format = '0.00"%"'
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
         day = datetime.now(KST).strftime("%Y%m%d_%H%M")
         output.name = f"leading_{kind}_{day}.xlsx"
-        await q.message.reply_document(document=output, filename=output.name, caption=f"📥 {ws.title}: {len(rows)}건\n※ 미종료 리딩은 전체 파일에만 포함됩니다.")
+        await q.message.reply_document(document=output, filename=output.name, caption=f"📥 리딩 기록 {len(rows)}건\n첫 번째 시트는 공유용 요약, 두 번째 시트는 관리자 상세 기록입니다.")
 
 
 
