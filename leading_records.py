@@ -58,6 +58,13 @@ def setup():
             notified_at TEXT NOT NULL, observed_price REAL NOT NULL,
             PRIMARY KEY(record_id,milestone)
         )""")
+        cols={x["name"] for x in conn.execute("PRAGMA table_info(leading_records)")}
+        if "monitor_active" not in cols:
+            conn.execute("ALTER TABLE leading_records ADD COLUMN monitor_active INTEGER NOT NULL DEFAULT 1")
+            conn.execute("UPDATE leading_records SET monitor_active=0 WHERE result_type!='open'")
+        alert_cols={x["name"] for x in conn.execute("PRAGMA table_info(leading_alerts)")}
+        if "delivery_status" not in alert_cols:
+            conn.execute("ALTER TABLE leading_alerts ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'sent'")
         conn.commit()
 
 
@@ -259,7 +266,7 @@ async def record_result(update, context):
     q = update.callback_query
     await q.answer()
     with connection() as conn:
-        rows = conn.execute("SELECT id,symbol,entry_price FROM leading_records WHERE result_type='open' ORDER BY id DESC LIMIT 30").fetchall()
+        rows = conn.execute("SELECT id,symbol,entry_price FROM leading_records WHERE result_type IN ('open','stopped') ORDER BY id DESC LIMIT 30").fetchall()
     if not rows:
         await q.message.reply_text("현재 결과를 입력할 진행 중인 리딩이 없습니다.", reply_markup=menu())
         return ConversationHandler.END
@@ -273,7 +280,7 @@ async def result_choose(update, context):
     await q.answer()
     rid = int(q.data.split(":")[-1])
     with connection() as conn:
-        record = conn.execute("SELECT id,symbol FROM leading_records WHERE id=? AND result_type='open'", (rid,)).fetchone()
+        record = conn.execute("SELECT id,symbol FROM leading_records WHERE id=? AND result_type IN ('open','stopped')", (rid,)).fetchone()
     if not record:
         await q.message.reply_text("이미 종료됐거나 찾을 수 없는 리딩입니다.")
         return ConversationHandler.END
@@ -298,8 +305,8 @@ async def result_input(update, context):
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     with connection() as conn:
         changed = conn.execute(
-            """UPDATE leading_records SET result_pct=?, result_type=?, closed_at=?
-            WHERE id=? AND result_type='open'""", (pct, kind, now, rid)
+            """UPDATE leading_records SET result_pct=?, result_type=?, closed_at=?, monitor_active=0
+            WHERE id=? AND result_type IN ('open','stopped')""", (pct, kind, now, rid)
         ).rowcount
         conn.commit()
     context.user_data.pop("leading_close_id", None)
@@ -329,8 +336,8 @@ async def callbacks(update, context):
         ]))
     elif action == "lead:open":
         with connection() as conn:
-            rows = conn.execute("SELECT * FROM leading_records WHERE result_type='open' ORDER BY id DESC LIMIT 20").fetchall()
-            count = conn.execute("SELECT COUNT(*) FROM leading_records WHERE result_type='open'").fetchone()[0]
+            rows = conn.execute("SELECT * FROM leading_records WHERE result_type='open' AND monitor_active=1 ORDER BY id DESC LIMIT 20").fetchall()
+            count = conn.execute("SELECT COUNT(*) FROM leading_records WHERE result_type='open' AND monitor_active=1").fetchone()[0]
         if not rows:
             await q.message.reply_text("📊 진행 중인 리딩이 없습니다.")
             return
@@ -440,7 +447,7 @@ async def monitor_prices(app, admin_id):
     while True:
         try:
             with connection() as conn:
-                records = conn.execute("SELECT * FROM leading_records WHERE result_type='open' AND target_mode='price'").fetchall()
+                records = conn.execute("SELECT * FROM leading_records WHERE result_type='open' AND monitor_active=1 AND target_mode='price'").fetchall()
             if records:
                 prices = await asyncio.to_thread(get_prices, {"KRW-" + r["symbol"] for r in records})
                 for r in records:
@@ -467,7 +474,7 @@ async def monitor_prices(app, admin_id):
                                    "📢 관리자 확인 및 안내가 필요합니다.\n"
                                    "※ 업비트 KRW 조회 시세 기준, 체결 수익률이 아닙니다.")
                         with connection() as conn:
-                            still_open = conn.execute("SELECT 1 FROM leading_records WHERE id=? AND result_type='open'", (r["id"],)).fetchone()
+                            still_open = conn.execute("SELECT 1 FROM leading_records WHERE id=? AND result_type='open' AND monitor_active=1", (r["id"],)).fetchone()
                         if not still_open:
                             break
                         await app.bot.send_message(chat_id=admin_id,text=message,parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[
@@ -501,12 +508,12 @@ async def management_buttons(update, context):
         await q.answer("기록을 찾을 수 없습니다.", show_alert=True)
         return
     if kind == "keep":
-        if row["result_type"] == "open":
+        if row["result_type"] == "open" and row["monitor_active"] == 1:
             await q.message.reply_text(f"🔔 #{record_id} {coin_label(row)}\n알림을 유지합니다. 남은 목표가 및 손절가를 계속 감시합니다.")
         else:
             await q.message.reply_text("이미 종료된 리딩입니다. 기존 기록은 유지됩니다.")
     elif kind == "stopask":
-        if row["result_type"] != "open":
+        if row["result_type"] != "open" or row["monitor_active"] != 1:
             await q.message.reply_text("이미 종료된 리딩입니다.")
             return
         await q.message.reply_text(
@@ -523,7 +530,7 @@ async def management_buttons(update, context):
         now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
         with connection() as conn:
             updated = conn.execute(
-                "UPDATE leading_records SET result_type='stopped', closed_at=? WHERE id=? AND result_type='open'",
+                "UPDATE leading_records SET result_type='stopped', monitor_active=0, closed_at=? WHERE id=? AND result_type='open' AND monitor_active=1",
                 (now, record_id)
             ).rowcount
             conn.commit()
