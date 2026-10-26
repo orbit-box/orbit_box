@@ -2,6 +2,10 @@
 import io
 import os
 import sqlite3
+import asyncio
+import json
+import urllib.request
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from html import escape
@@ -13,6 +17,7 @@ from telegram.ext import CommandHandler, CallbackQueryHandler, ConversationHandl
 
 KST = ZoneInfo("Asia/Seoul")
 TRADE_SYMBOL, TRADE_ENTRY, TRADE_T1, TRADE_T2, TRADE_T3, TRADE_RESULT = range(30, 36)
+_MARKET_CACHE = {"at": 0, "data": []}
 
 
 def connection():
@@ -59,22 +64,70 @@ async def start_admin(update, context):
     await update.message.reply_text("📊 투자자 베이스캠프 | 관리자 리딩 관리\n\n리딩 등록, 결과 기록, 엑셀 내보내기를 선택하세요.", reply_markup=menu())
 
 
+
+def fetch_upbit_markets():
+    if _MARKET_CACHE["data"] and time.monotonic() - _MARKET_CACHE["at"] < 3600:
+        return _MARKET_CACHE["data"]
+    req = urllib.request.Request("https://api.upbit.com/v1/market/all?is_details=false", headers={"User-Agent": "BasecampBot/1.0"})
+    with urllib.request.urlopen(req, timeout=6) as res:
+        data = json.load(res)
+    markets = [v for v in data if v.get("market", "").startswith("KRW-")]
+    _MARKET_CACHE.update({"at": time.monotonic(), "data": markets})
+    return markets
+
+
+async def search_markets(term):
+    try:
+        markets = await asyncio.to_thread(fetch_upbit_markets)
+    except Exception:
+        return None
+    t = term.casefold().strip()
+    return [v for v in markets if t in v.get("market","").casefold() or t in v.get("korean_name","").casefold() or t in v.get("english_name","").casefold()][:10]
+
+
+async def pick_symbol(update, context):
+    q = update.callback_query
+    await q.answer()
+    form = context.user_data.get("leading_form")
+    if not form:
+        await q.message.reply_text("입력 시간이 종료되었습니다. 리딩 등록부터 다시 시작해 주세요.")
+        return ConversationHandler.END
+    try:
+        choice = form.get("search_results", [])[int(q.data.rsplit(":", 1)[-1])]
+    except (ValueError, IndexError, TypeError):
+        await q.message.reply_text("검색이 만료되었습니다. 다시 검색해 주세요.")
+        return TRADE_SYMBOL
+    await q.edit_message_reply_markup(reply_markup=None)
+    symbol = choice["market"].split("-")[1]
+    form["symbol"] = symbol
+    await q.message.reply_text(f"✅ {symbol} 선택 완료\n진입가(원)를 숫자로 입력하세요. 예: 2000")
+    return TRADE_ENTRY
+
 async def begin_add(update, context):
     q = update.callback_query
     await q.answer()
+    await q.edit_message_reply_markup(reply_markup=None)
     context.user_data["leading_form"] = {}
-    await q.message.reply_text("➕ 리딩 등록\n\n종목 티커를 입력하세요. 예: XRP\n취소: /cancel")
+    await q.message.reply_text("🔎 종목 검색 (업비트 KRW)\n\n한글 종목명 또는 티커를 입력하세요.\n예: 리플 / XRP / 비트코인\n검색 결과에서 종목을 선택할 수 있습니다.\n취소: /cancel")
     return TRADE_SYMBOL
 
 
 async def receive_symbol(update, context):
-    symbol = update.message.text.strip().upper()
-    if not (2 <= len(symbol) <= 25) or not all(c.isalnum() or c in "-_" for c in symbol):
-        await update.message.reply_text("종목 티커를 다시 입력해 주세요. 예: XRP")
+    term = update.message.text.strip()
+    if not term or len(term) > 40:
+        await update.message.reply_text("종목명 또는 티커를 40자 이내로 입력해 주세요.")
         return TRADE_SYMBOL
-    context.user_data["leading_form"]["symbol"] = symbol
-    await update.message.reply_text("진입가를 숫자로 입력하세요. 예: 2000")
-    return TRADE_ENTRY
+    results = await search_markets(term)
+    if results is None:
+        await update.message.reply_text("⚠️ 업비트 검색 서버 연결에 실패했습니다. 잠시 후 다시 검색해 주세요.")
+        return TRADE_SYMBOL
+    if not results:
+        await update.message.reply_text("검색 결과가 없습니다. 업비트 원화마켓의 한글명 또는 티커로 다시 검색해 주세요.")
+        return TRADE_SYMBOL
+    context.user_data["leading_form"]["search_results"] = results
+    buttons = [[InlineKeyboardButton(f"{x['korean_name']} ({x['market'].split('-')[1]})", callback_data=f"lead:pick:{i}")] for i,x in enumerate(results)]
+    await update.message.reply_text("🔎 검색 결과 (업비트 KRW)\n종목을 선택하세요.", reply_markup=InlineKeyboardMarkup(buttons))
+    return TRADE_SYMBOL
 
 
 def parse_positive(t):
@@ -271,7 +324,7 @@ def install(app, admin_id):
     add = ConversationHandler(
         entry_points=[CallbackQueryHandler(begin_add, pattern=r"^lead:add$")],
         states={
-            TRADE_SYMBOL:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, receive_symbol)],
+            TRADE_SYMBOL:[CallbackQueryHandler(pick_symbol, pattern=r"^lead:pick:\d+$"), MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, receive_symbol)],
             TRADE_ENTRY:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, receive_entry)],
             TRADE_T1:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, goal1)],
             TRADE_T2:[MessageHandler(admin_chat & filters.TEXT & ~filters.COMMAND, goal2)],
