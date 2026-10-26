@@ -807,6 +807,8 @@ def main():
     init_db()
     init_form_assignments()
     app = Application.builder().token(BOT_TOKEN).build()
+    from leading_records import install as install_leading_records
+    install_leading_records(app, ADMIN_CHAT_ID)
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
