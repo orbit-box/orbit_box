@@ -135,7 +135,7 @@ def privacy_text() -> str:
 멤버십 이용 방법과 가입 절차를 담당자가 안내해 드립니다.
 
 <b>개인정보 수집·이용 동의</b>
-• 수집: 성함, 연락처, 투자 방식(현물/선물), 텔레그램 계정 정보
+• 수집: 성함, 연락처, 투자 방식, 투자금액 구간, 텔레그램 계정 정보
 • 목적: 멤버십 신청 확인 및 전화·텔레그램 안내
 • 보유: 신청 처리 완료 또는 상담 종료 후 6개월
 • 운영자: {PRIVACY_OPERATOR}
@@ -148,7 +148,7 @@ def privacy_text() -> str:
 def privacy_details() -> str:
     return f"""<b>개인정보 처리 상세 안내</b>
 
-1. 수집 항목: 이름, 연락처, 코인 투자 방식(현물/선물/둘 다), 텔레그램 이름·사용자명·계정 ID
+1. 수집 항목: 이름, 연락처, 코인 투자 방식, 투자금액 구간, 텔레그램 이름·사용자명·계정 ID
 2. 이용 목적: 멤버십 신청 확인, 연락 및 가입 안내, 중복 신청과 상담 상태 관리
 3. 보유 기간: 신청 처리 완료 또는 상담 종료 후 6개월 (법령상 보존 의무가 있으면 해당 기간)
 4. 제3자 제공: 원칙적으로 제공하지 않으며, 별도 동의 또는 법령상 의무가 있는 경우에만 제공
@@ -526,7 +526,19 @@ async def investment_style_callback(update, context):
         return INVESTMENT_STYLE
     context.user_data["investment_style"]=selected
     await query.edit_message_reply_markup(reply_markup=None)
-    return await submit_short_membership(update, context)
+    await query.message.reply_text("<b>현재 코인 투자금액은 어느 정도인가요?</b>\\n가장 가까운 구간을 선택해 주세요.",parse_mode=ParseMode.HTML,reply_markup=inline_options("memberamount", AMOUNT_OPTIONS,2))
+    return AMOUNT
+
+
+async def membership_amount_callback(update, context):
+    query=update.callback_query
+    await query.answer()
+    idx=int(query.data.rsplit(":",1)[-1])
+    if idx<0 or idx>=len(AMOUNT_OPTIONS):
+        return AMOUNT
+    context.user_data["amount"]=AMOUNT_OPTIONS[idx]
+    await query.edit_message_reply_markup(reply_markup=None)
+    return await submit_short_membership(update,context)
 
 
 async def submit_short_membership(update, context):
@@ -540,7 +552,7 @@ async def submit_short_membership(update, context):
              experience,amount_range,interests,help_type,status)
              VALUES (?,?,?,?,?,?,?,?,?,?,'new')""",
              (now,user.id,user.username,user.full_name,data["name"],data["phone"],
-              "미수집","미수집",None,data["investment_style"]))
+              "미수집",data["amount"],None,data["investment_style"]))
         app_id=cur.lastrowid
         conn.commit()
         row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone()
@@ -553,8 +565,8 @@ async def submit_short_membership(update, context):
         conn.execute("UPDATE applications SET admin_message_id=? WHERE id=?",(admin_msg.message_id,app_id))
         conn.commit()
     await update.effective_message.reply_text(
-        "<b>✅ 멤버십 신청이 접수되었습니다.</b>\\n\\n"
-        "담당자가 가입 방법과 이용 안내를 순차적으로 연락드리겠습니다.\\n"
+        "<b>✅ 멤버십 신청이 접수되었습니다.</b>\n\n"
+        "담당자가 가입 방법과 이용 안내를 순차적으로 연락드리겠습니다.\n"
         f"{OPERATING_HOURS_NOTICE}",
         parse_mode=ParseMode.HTML,reply_markup=ReplyKeyboardRemove())
     context.user_data.clear()
@@ -871,7 +883,7 @@ def main():
             ],
             INVESTMENT_STYLE: [CallbackQueryHandler(investment_style_callback, pattern=r"^invest:(spot|futures|both)$")],
             EXPERIENCE: [CallbackQueryHandler(experience_callback, pattern=r"^exp:\d+$")],
-            AMOUNT: [CallbackQueryHandler(amount_callback, pattern=r"^amt:\d+$")],
+            AMOUNT: [CallbackQueryHandler(membership_amount_callback, pattern=r"^memberamount:\d+$")],
             INTERESTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, interests_input)],
             HELP_TYPE: [CallbackQueryHandler(help_callback, pattern=r"^help:\d+$")],
             CONFIRM: [CallbackQueryHandler(confirm_callback, pattern=r"^confirm:(submit|restart)$")],
