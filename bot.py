@@ -220,8 +220,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ 동의하고 멤버십 신청", callback_data="consent:yes")],
-        [InlineKeyboardButton("📄 개인정보 상세보기", callback_data="consent:details")],
-        [InlineKeyboardButton("상담사 연결", callback_data="consult:request")],
+        [InlineKeyboardButton("📄 개인정보 동의안 상세보기", callback_data="consent:details")],
+        [InlineKeyboardButton("📞 상담사 연결", callback_data="consult:request")],
         [InlineKeyboardButton("동의하지 않습니다", callback_data="consent:no")],
     ])
     await update.message.reply_text(
@@ -616,7 +616,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("동의하고 참가신청 시작", callback_data="consent:yes")],
-            [InlineKeyboardButton("상담사 연결", callback_data="consult:request")],
+            [InlineKeyboardButton("📞 상담사 연결", callback_data="consult:request")],
             [InlineKeyboardButton("동의하지 않습니다", callback_data="consent:no")],
         ])
         await query.message.reply_text(
