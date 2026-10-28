@@ -502,8 +502,7 @@ async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return PHONE
     context.user_data["phone"] = normalize_phone(text)
-    await ask_experience(update, context)
-    return EXPERIENCE
+    return await ask_investment_style(update, context)
 
 async def ask_investment_style(update, context):
     await update.message.reply_text(
@@ -553,7 +552,7 @@ async def submit_short_membership(update, context):
     with db() as conn:
         conn.execute("UPDATE applications SET admin_message_id=? WHERE id=?",(admin_msg.message_id,app_id))
         conn.commit()
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "<b>✅ 멤버십 신청이 접수되었습니다.</b>\\n\\n"
         "담당자가 가입 방법과 이용 안내를 순차적으로 연락드리겠습니다.\\n"
         f"{OPERATING_HOURS_NOTICE}",
