@@ -40,7 +40,7 @@ if not ADMIN_CHAT_ID:
 ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
 KST = ZoneInfo("Asia/Seoul")
 
-(CONSENT, NAME, PHONE, EXPERIENCE, AMOUNT, INTERESTS, HELP_TYPE, CONFIRM) = range(8)
+(CONSENT, NAME, PHONE, EXPERIENCE, AMOUNT, INTERESTS, HELP_TYPE, CONFIRM, INVESTMENT_STYLE) = range(9)
 
 EXPERIENCE_OPTIONS = [
     "투자 경험 없음",
@@ -135,7 +135,7 @@ def privacy_text() -> str:
 멤버십 이용 방법과 가입 절차를 담당자가 안내해 드립니다.
 
 <b>개인정보 수집·이용 동의</b>
-• 수집: 성함, 연락처, 텔레그램 계정 정보
+• 수집: 성함, 연락처, 투자 방식(현물/선물), 텔레그램 계정 정보
 • 목적: 멤버십 신청 확인 및 전화·텔레그램 안내
 • 보유: 신청 처리 완료 또는 상담 종료 후 6개월
 • 운영자: {PRIVACY_OPERATOR}
@@ -148,7 +148,7 @@ def privacy_text() -> str:
 def privacy_details() -> str:
     return f"""<b>개인정보 처리 상세 안내</b>
 
-1. 수집 항목: 이름, 연락처, 텔레그램 이름·사용자명·계정 ID
+1. 수집 항목: 이름, 연락처, 코인 투자 방식(현물/선물/둘 다), 텔레그램 이름·사용자명·계정 ID
 2. 이용 목적: 멤버십 신청 확인, 연락 및 가입 안내, 중복 신청과 상담 상태 관리
 3. 보유 기간: 신청 처리 완료 또는 상담 종료 후 6개월 (법령상 보존 의무가 있으면 해당 기간)
 4. 제3자 제공: 원칙적으로 제공하지 않으며, 별도 동의 또는 법령상 의무가 있는 경우에만 제공
@@ -202,7 +202,7 @@ def admin_application_text(row: dict | sqlite3.Row, status: str = "new") -> str:
         f"<b>투자경력</b>: {row['experience']}\n"
         f"<b>투자금액</b>: {row['amount_range']}\n"
         f"<b>보유·관심 종목</b>: {row['interests'] or '없음'}\n"
-        f"<b>도움 요청</b>: {row['help_type'] or '없음'}\n"
+        f"<b>투자 방식</b>: {row['help_type'] or '미수집'}\n"
         f"<b>Telegram</b>: @{username if username != '없음' else '없음'}\n"
         f"<b>User ID</b>: <code>{row['telegram_user_id']}</code>\n"
         f"<b>신청시간</b>: {row['created_at']}\n\n"
@@ -485,7 +485,7 @@ async def phone_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("전화번호를 다시 확인해 주세요.")
         return PHONE
     context.user_data["phone"] = normalize_phone(contact.phone_number)
-    return await submit_short_membership(update, context)
+    return await ask_investment_style(update, context)
 
 async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -505,6 +505,31 @@ async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ask_experience(update, context)
     return EXPERIENCE
 
+async def ask_investment_style(update, context):
+    await update.message.reply_text(
+        "<b>현재 코인 투자 방식은 어떻게 되시나요?</b>\n\n가장 가까운 항목을 선택해 주세요.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🪙 현물만", callback_data="invest:spot")],
+            [InlineKeyboardButton("📈 선물만", callback_data="invest:futures")],
+            [InlineKeyboardButton("🔄 현물·선물 둘 다", callback_data="invest:both")],
+        ]),
+    )
+    return INVESTMENT_STYLE
+
+
+async def investment_style_callback(update, context):
+    query=update.callback_query
+    await query.answer()
+    choices={"spot":"현물만","futures":"선물만","both":"현물·선물 둘 다"}
+    selected=choices.get(query.data.split(":")[-1])
+    if not selected:
+        return INVESTMENT_STYLE
+    context.user_data["investment_style"]=selected
+    await query.edit_message_reply_markup(reply_markup=None)
+    return await submit_short_membership(update, context)
+
+
 async def submit_short_membership(update, context):
     """Store only minimal required contact fields; keep legacy DB columns compatible."""
     user=update.effective_user
@@ -516,7 +541,7 @@ async def submit_short_membership(update, context):
              experience,amount_range,interests,help_type,status)
              VALUES (?,?,?,?,?,?,?,?,?,?,'new')""",
              (now,user.id,user.username,user.full_name,data["name"],data["phone"],
-              "미수집","미수집",None,None))
+              "미수집","미수집",None,data["investment_style"]))
         app_id=cur.lastrowid
         conn.commit()
         row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone()
@@ -845,6 +870,7 @@ def main():
                 MessageHandler(filters.CONTACT, phone_contact),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, phone_text),
             ],
+            INVESTMENT_STYLE: [CallbackQueryHandler(investment_style_callback, pattern=r"^invest:(spot|futures|both)$")],
             EXPERIENCE: [CallbackQueryHandler(experience_callback, pattern=r"^exp:\d+$")],
             AMOUNT: [CallbackQueryHandler(amount_callback, pattern=r"^amt:\d+$")],
             INTERESTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, interests_input)],
