@@ -130,48 +130,33 @@ def init_db():
         conn.commit()
 
 def privacy_text() -> str:
-    return f"""
+    return f"""<b>💎 멤버십 신청</b>
+
+멤버십 이용 방법과 가입 절차를 담당자가 안내해 드립니다.
+
 <b>개인정보 수집·이용 동의</b>
+• 수집: 성함, 연락처, 텔레그램 계정 정보
+• 목적: 멤버십 신청 확인 및 전화·텔레그램 안내
+• 보유: 신청 처리 완료 또는 상담 종료 후 6개월
+• 운영자: {PRIVACY_OPERATOR}
+• 문의처: {PRIVACY_CONTACT}
 
-참가 신청 및 상담 진행을 위해 아래와 같이 개인정보를 수집·이용합니다.
+동의를 거부할 수 있으나, 이 경우 신청할 수 없습니다.
+원하시는 경우 아래 상세 안내도 확인해 주세요."""
 
-<b>1. 수집 항목</b>
-• 이름
-• 전화번호
-• 투자경력
-• 현재 운용 중인 투자금액 구간
-• 텔레그램 계정 정보(사용자명, 사용자 ID 등)
 
-<b>2. 이용 목적</b>
-• 참가 신청자 확인
-• 신청 내용 확인 및 상담 진행
-• 필요한 안내 및 연락
-• 투자경력과 투자규모를 참고한 상담 방향 설정
-• 중복 신청 및 상담 진행 상태 관리
+def privacy_details() -> str:
+    return f"""<b>개인정보 처리 상세 안내</b>
 
-투자경력 및 투자금액은 상황에 맞는 상담과 안내를 위한 참고 자료이며, 투자 자격 판단이나 수익 보장을 위한 목적으로 수집하지 않습니다.
-
-<b>3. 보유 기간</b>
-상담 종료 또는 참가 신청 처리 완료일로부터 <b>6개월</b>간 보관 후 파기합니다.
-다만 관계 법령에 따라 보관이 필요한 경우 해당 기간 동안 보관할 수 있습니다.
-
-<b>4. 제3자 제공</b>
-수집된 개인정보는 원칙적으로 제3자에게 제공하지 않습니다.
-이용자의 별도 동의가 있거나 법령상 의무가 있는 경우에만 필요한 범위에서 제공될 수 있습니다.
-
-<b>5. 동의 거부 권리</b>
-개인정보 수집·이용에 동의하지 않을 권리가 있습니다.
-다만 참가 신청 및 상담에 필요한 정보의 수집에 동의하지 않는 경우 신청 진행이 제한될 수 있습니다.
-
-<b>6. 문의</b>
-운영자: {PRIVACY_OPERATOR}
-문의처: {PRIVACY_CONTACT}
-
-<b>운영시간 안내</b>
-{OPERATING_HOURS_NOTICE}
-
-위 내용을 확인하였으며 개인정보 수집·이용에 동의하시겠습니까?
-""".strip()
+1. 수집 항목: 이름, 연락처, 텔레그램 이름·사용자명·계정 ID
+2. 이용 목적: 멤버십 신청 확인, 연락 및 가입 안내, 중복 신청과 상담 상태 관리
+3. 보유 기간: 신청 처리 완료 또는 상담 종료 후 6개월 (법령상 보존 의무가 있으면 해당 기간)
+4. 제3자 제공: 원칙적으로 제공하지 않으며, 별도 동의 또는 법령상 의무가 있는 경우에만 제공
+5. 동의 거부: 거부할 수 있으나 신청 절차는 진행할 수 없음
+6. 운영자: {PRIVACY_OPERATOR}
+7. 문의처: {PRIVACY_CONTACT}
+8. 상담: {OPERATING_HOURS_NOTICE}
+""" 
 
 def inline_options(prefix: str, options: list[str], columns: int = 2):
     rows = []
@@ -210,7 +195,7 @@ def summary_text(data: dict) -> str:
 def admin_application_text(row: dict | sqlite3.Row, status: str = "new") -> str:
     username = row["telegram_username"] if row["telegram_username"] else "없음"
     return (
-        "🔔 <b>새로운 참가신청이 도착했습니다.</b>\n\n"
+        "💎 <b>새로운 멤버십 신청이 도착했습니다.</b>\n\n"
         f"<b>신청번호</b>: #{row['id']}\n"
         f"<b>이름</b>: {row['name']}\n"
         f"<b>전화번호</b>: {row['phone']}\n"
@@ -234,7 +219,8 @@ def admin_status_keyboard(app_id: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("동의하고 참가신청 시작", callback_data="consent:yes")],
+        [InlineKeyboardButton("✅ 동의하고 멤버십 신청", callback_data="consent:yes")],
+        [InlineKeyboardButton("📄 개인정보 상세보기", callback_data="consent:details")],
         [InlineKeyboardButton("상담사 연결", callback_data="consult:request")],
         [InlineKeyboardButton("동의하지 않습니다", callback_data="consent:no")],
     ])
@@ -453,6 +439,12 @@ async def consultation_admin_reply(update: Update, context: ContextTypes.DEFAULT
         text=update.message.text,
     )
 
+async def privacy_details_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query
+    await q.answer()
+    await q.message.reply_text(privacy_details(),parse_mode=ParseMode.HTML)
+
+
 async def consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -493,8 +485,7 @@ async def phone_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("전화번호를 다시 확인해 주세요.")
         return PHONE
     context.user_data["phone"] = normalize_phone(contact.phone_number)
-    await ask_experience(update, context)
-    return EXPERIENCE
+    return await submit_short_membership(update, context)
 
 async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -513,6 +504,38 @@ async def phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["phone"] = normalize_phone(text)
     await ask_experience(update, context)
     return EXPERIENCE
+
+async def submit_short_membership(update, context):
+    """Store only minimal required contact fields; keep legacy DB columns compatible."""
+    user=update.effective_user
+    data=context.user_data
+    now=datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    with db() as conn:
+        cur=conn.execute("""INSERT INTO applications
+            (created_at,telegram_user_id,telegram_username,telegram_name,name,phone,
+             experience,amount_range,interests,help_type,status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,'new')""",
+             (now,user.id,user.username,user.full_name,data["name"],data["phone"],
+              "미수집","미수집",None,None))
+        app_id=cur.lastrowid
+        conn.commit()
+        row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone()
+    admin_msg=await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=admin_application_text(row,"new"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_status_keyboard(app_id))
+    with db() as conn:
+        conn.execute("UPDATE applications SET admin_message_id=? WHERE id=?",(admin_msg.message_id,app_id))
+        conn.commit()
+    await update.message.reply_text(
+        "<b>✅ 멤버십 신청이 접수되었습니다.</b>\\n\\n"
+        "담당자가 가입 방법과 이용 안내를 순차적으로 연락드리겠습니다.\\n"
+        f"{OPERATING_HOURS_NOTICE}",
+        parse_mode=ParseMode.HTML,reply_markup=ReplyKeyboardRemove())
+    context.user_data.clear()
+    return ConversationHandler.END
+
 
 async def ask_experience(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -814,6 +837,7 @@ def main():
         states={
             CONSENT: [
                 CallbackQueryHandler(consent_callback, pattern=r"^consent:(yes|no)$"),
+                CallbackQueryHandler(privacy_details_callback, pattern=r"^consent:details$"),
                 CallbackQueryHandler(consultation_request_callback, pattern=r"^consult:request$"),
             ],
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
